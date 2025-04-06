@@ -61,7 +61,7 @@ function App() {
   // const apiUrl = process.env.REACT_APP_API_URL || 'http://localhost:8000';
   // const wsUrl = process.env.REACT_APP_WS_URL || 'ws://localhost:8000/ws';
   const apiUrl = 'https://chitchat-f4e6.onrender.com';
-  const wsUrl = 'wss://https://chitchat-f4e6.onrender.com/ws';
+  const wsUrl = 'wss://chitchat-f4e6.onrender.com/ws';
   // Enhanced color scheme
   const primaryBg = useColorModeValue('#F7FAFC', '#0D0D0D');
   const secondaryBg = useColorModeValue('#EDF2F7', '#1C1C1C');
