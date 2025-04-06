@@ -1,7 +1,7 @@
 fastapi
 uvicorn
-asyncpg
+websockets  # Add this explicitly
 python-jose[cryptography]
 passlib[bcrypt]
+asyncpg
 python-dotenv
-pydantic
