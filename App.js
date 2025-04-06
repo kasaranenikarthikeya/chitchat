@@ -58,10 +58,9 @@ function App() {
   const { isOpen: isImageOpen, onOpen: onImageOpen, onClose: onImageClose } = useDisclosure();
   const { isOpen: isFriendRequestsOpen, onOpen: onFriendRequestsOpen, onClose: onFriendRequestsClose } = useDisclosure();
 
-  // const apiUrl = process.env.REACT_APP_API_URL || 'http://localhost:8000';
-  // const wsUrl = process.env.REACT_APP_WS_URL || 'ws://localhost:8000/ws';
   const apiUrl = 'https://chitchat-f4e6.onrender.com';
-  const wsUrl = 'wss://chitchat-f4e6.onrender.com/ws';
+  const wsUrl = 'wss://chitchat-f4e6.onrender.com/ws'; // Correct WebSocket URL
+
   // Enhanced color scheme
   const primaryBg = useColorModeValue('#F7FAFC', '#0D0D0D');
   const secondaryBg = useColorModeValue('#EDF2F7', '#1C1C1C');
@@ -132,17 +131,11 @@ function App() {
       setFriendRequests(requestsData);
       setFriendRequestCount(requestsData.filter(req => req.status === 'pending').length);
 
-      // Optional suggestions fetch
-      try {
-        const suggestionsRes = await fetch(`${apiUrl}/users/suggestions`, { headers: { 'Authorization': `Bearer ${token}` } });
-        const suggestionsData = await suggestionsRes.json();
-        if (suggestionsRes.ok) {
-          setSuggestedFriends(suggestionsData.slice(0, 5));
-        } else {
-          setSuggestedFriends([]); // Fallback if suggestions endpoint fails
-        }
-      } catch (suggestionError) {
-        console.warn('Suggestions fetch failed:', suggestionError.message);
+      const suggestionsRes = await fetch(`${apiUrl}/users/suggestions`, { headers: { 'Authorization': `Bearer ${token}` } });
+      const suggestionsData = await suggestionsRes.json();
+      if (suggestionsRes.ok) {
+        setSuggestedFriends(suggestionsData.slice(0, 5));
+      } else {
         setSuggestedFriends([]);
       }
     } catch (e) {
@@ -1149,266 +1142,214 @@ function App() {
                       </PopoverBody>
                     </PopoverContent>
                   </Popover>
+                  <IconButton
+                    icon={<FaMicrophone />}
+                    variant="ghost"
+                    color={accentColor}
+                    _hover={{ color: buttonHoverBg }}
+                    onClick={startRecording}
+                  />
+                  <MotionButton
+                    onClick={() => sendMessage()}
+                    bg={buttonBg}
+                    color={primaryText}
+                    _hover={{ bg: buttonHoverBg }}
+                    borderRadius="full"
+                    isLoading={isLoading}
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                  >
+                    <FaPaperPlane />
+                  </MotionButton>
                 </>
               ) : isRecording ? (
-                <Flex flex={1} align="center" bg={glassBg} p={3} borderRadius="full" border="1px solid" borderColor={accentColor}>
-                  <Text color={errorColor} mr={2}>{formatTime(recordingTime)}</Text>
-                  <HStack spacing={1}>
-                    {Array.from({ length: 8 }).map((_, i) => (
-                      <MotionBox
-                        key={i}
-                        w={1}
-                        bg={errorColor}
-                        borderRadius="full"
-                        animate={{ height: [4, 8, 4] }}
-                        transition={{ duration: 0.4, repeat: Infinity, delay: i * 0.08 }}
-                      />
-                    ))}
+                <HStack flex={1} justify="space-between">
+                  <Text color={textColor}>Recording: {formatTime(recordingTime)}</Text>
+                  <HStack spacing={2}>
+                    <MotionBox w={2} h={6} bg={errorColor} borderRadius="full" animate={{ height: [6, 12, 6] }} transition={{ duration: 0.5, repeat: Infinity }} />
+                    <MotionBox w={2} h={6} bg={errorColor} borderRadius="full" animate={{ height: [6, 12, 6] }} transition={{ duration: 0.5, repeat: Infinity, delay: 0.2 }} />
+                    <MotionBox w={2} h={6} bg={errorColor} borderRadius="full" animate={{ height: [6, 12, 6] }} transition={{ duration: 0.5, repeat: Infinity, delay: 0.4 }} />
                   </HStack>
-                  <MotionButton
-                    ml={3}
-                    size="sm"
-                    bg={errorColor}
-                    color={primaryText}
+                  <IconButton
+                    icon={<FaStop />}
+                    variant="ghost"
+                    color={errorColor}
+                    _hover={{ color: '#E02A20' }}
                     onClick={stopRecording}
-                    leftIcon={<FaStop />}
-                    whileHover={{ scale: 1.05 }}
-                  >
-                    Stop
-                  </MotionButton>
-                </Flex>
+                  />
+                </HStack>
               ) : (
-                <Flex flex={1} align="center" bg={glassBg} p={3} borderRadius="full" border="1px solid" borderColor={accentColor}>
-                  <audio controls src={URL.createObjectURL(audioBlob)} style={{ width: '100%', maxWidth: '300px' }} />
-                  <HStack ml={3}>
-                    <MotionButton
-                      size="sm"
-                      bg={buttonBg}
-                      color={primaryText}
-                      _hover={{ bg: buttonHoverBg }}
+                <HStack flex={1} justify="space-between">
+                  <audio src={URL.createObjectURL(audioBlob)} controls />
+                  <HStack>
+                    <IconButton
+                      icon={<FaPaperPlane />}
+                      variant="ghost"
+                      color={accentColor}
+                      _hover={{ color: buttonHoverBg }}
                       onClick={sendAudioMessage}
-                      whileHover={{ scale: 1.05 }}
-                    >
-                      Send
-                    </MotionButton>
-                    <MotionButton
-                      size="sm"
-                      bg={secondaryText}
-                      color={primaryText}
+                    />
+                    <IconButton
+                      icon={<FaTrashAlt />}
+                      variant="ghost"
+                      color={errorColor}
+                      _hover={{ color: '#E02A20' }}
                       onClick={() => setAudioBlob(null)}
-                      whileHover={{ scale: 1.05 }}
-                    >
-                      Cancel
-                    </MotionButton>
+                    />
                   </HStack>
-                </Flex>
-              )}
-              <IconButton
-                icon={isRecording ? <FaStop /> : <FaMicrophone />}
-                variant="ghost"
-                color={isRecording ? errorColor : accentColor}
-                _hover={{ color: isRecording ? '#E02A20' : buttonHoverBg }}
-                onClick={isRecording ? stopRecording : startRecording}
-                isDisabled={audioBlob}
-                css={isRecording ? { animation: `${pulse} 1s infinite` } : {}}
-              />
-              {!isRecording && !audioBlob && (
-                <MotionButton
-                  leftIcon={<FaPaperPlane />}
-                  onClick={() => sendMessage()}
-                  bg={buttonBg}
-                  color={primaryText}
-                  borderRadius="full"
-                  _hover={{ bg: buttonHoverBg, transform: 'scale(1.05)' }}
-                  isLoading={isLoading}
-                  whileHover={{ scale: 1.05 }}
-                  whileTap={{ scale: 0.95 }}
-                >
-                  Send
-                </MotionButton>
+                </HStack>
               )}
             </HStack>
           </>
         ) : (
           <Flex flex={1} align="center" justify="center" bg={bgColor}>
-            <MotionBox
-              initial={{ opacity: 0, scale: 0.9 }}
-              animate={{ opacity: 1, scale: 1 }}
-              transition={{ duration: 0.5 }}
-              textAlign="center"
-              color={secondaryTextColor}
-              fontSize={{ base: 'lg', md: 'xl' }}
-              fontWeight="bold"
-              p={6}
-            >
-              Select a Friend to Start Chatting
-            </MotionBox>
+            <Text fontSize={{ base: 'lg', md: 'xl' }} color={secondaryTextColor}>Select a conversation to start chatting!</Text>
           </Flex>
         )}
       </Flex>
 
-      <Modal isOpen={isFriendRequestsOpen} onClose={onFriendRequestsClose} size={{ base: 'full', md: 'lg' }}>
+      <Modal isOpen={isDeleteOpen} onClose={onDeleteClose} size="sm">
         <ModalOverlay />
-        <ModalContent bg={secondaryBg} borderRadius={{ base: 0, md: 'xl' }}>
-          <ModalHeader>
-            <HStack justify="space-between">
-              <Text fontSize="xl" fontWeight="bold" color={textColor}>Friend Requests</Text>
-              <IconButton
-                icon={<FaTimes />}
-                variant="ghost"
-                color={secondaryTextColor}
-                _hover={{ color: accentColor }}
-                onClick={onFriendRequestsClose}
-              />
-            </HStack>
-          </ModalHeader>
+        <ModalContent bg={glassBg}>
+          <ModalHeader color={textColor}>Delete Message</ModalHeader>
+          <ModalBody color={secondaryTextColor}>Are you sure you want to delete this message?</ModalBody>
+          <ModalFooter>
+            <Button variant="ghost" color={secondaryTextColor} mr={3} onClick={onDeleteClose}>Cancel</Button>
+            <MotionButton
+              bg={errorColor}
+              color={primaryText}
+              _hover={{ bg: '#E02A20' }}
+              onClick={() => deleteMessage(showDeleteModal)}
+              whileHover={{ scale: 1.05 }}
+            >
+              Delete
+            </MotionButton>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+
+      <Modal isOpen={isConvDeleteOpen} onClose={onConvDeleteClose} size="sm">
+        <ModalOverlay />
+        <ModalContent bg={glassBg}>
+          <ModalHeader color={textColor}>Delete Conversation</ModalHeader>
+          <ModalBody color={secondaryTextColor}>Are you sure you want to delete this conversation with {showDeleteConversationModal}?</ModalBody>
+          <ModalFooter>
+            <Button variant="ghost" color={secondaryTextColor} mr={3} onClick={onConvDeleteClose}>Cancel</Button>
+            <MotionButton
+              bg={errorColor}
+              color={primaryText}
+              _hover={{ bg: '#E02A20' }}
+              onClick={() => deleteConversation(showDeleteConversationModal)}
+              whileHover={{ scale: 1.05 }}
+            >
+              Delete
+            </MotionButton>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+
+      <Modal isOpen={isImageOpen} onClose={onImageClose} size="xl">
+        <ModalOverlay />
+        <ModalContent bg="transparent" boxShadow="none">
+          <ModalBody p={0} display="flex" justifyContent="center" alignItems="center">
+            <Image src={expandedImage} maxH="80vh" maxW="80vw" objectFit="contain" borderRadius="lg" />
+          </ModalBody>
+          <ModalFooter justifyContent="center">
+            <MotionButton
+              onClick={onImageClose}
+              bg={buttonBg}
+              color={primaryText}
+              _hover={{ bg: buttonHoverBg }}
+              whileHover={{ scale: 1.05 }}
+            >
+              Close
+            </MotionButton>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+
+      <Modal isOpen={isFriendRequestsOpen} onClose={onFriendRequestsClose} size="md">
+        <ModalOverlay />
+        <ModalContent bg={glassBg}>
+          <ModalHeader color={textColor}>Friend Requests</ModalHeader>
           <ModalBody>
             <Tabs variant="soft-rounded" colorScheme="cyan">
               <TabList mb={4}>
-                <Tab>Requests ({friendRequestCount})</Tab>
-                <Tab>Suggestions</Tab>
+                <Tab color={textColor}>Pending ({friendRequests.filter(r => r.status === 'pending').length})</Tab>
+                <Tab color={textColor}>Suggestions</Tab>
               </TabList>
               <TabPanels>
                 <TabPanel p={0}>
-                  <VStack spacing={3}>
-                    <AnimatePresence>
-                      {friendRequests.map(req => (
-                        <MotionBox
-                          key={req.id}
-                          w="full"
-                          p={3}
-                          bg={hoverBg}
-                          borderRadius="lg"
-                          initial={{ opacity: 0, y: 20 }}
-                          animate={{ opacity: 1, y: 0 }}
-                          exit={{ opacity: 0 }}
-                        >
-                          <HStack justify="space-between" align="center">
-                            <HStack spacing={3}>
-                              <Avatar size="md" name={req.sender_username} />
-                              <VStack align="start" spacing={0}>
-                                <Text fontWeight="bold" color={textColor}>{req.sender_username}</Text>
-                                <Text fontSize="sm" color={secondaryTextColor}>Sent you a request</Text>
-                              </VStack>
-                            </HStack>
-                            <HStack spacing={2}>
-                              <MotionButton
-                                size="sm"
-                                bg={buttonBg}
-                                color={primaryText}
-                                leftIcon={<FaCheck />}
-                                onClick={() => respondFriendRequest(req.id, true)}
-                                whileHover={{ scale: 1.05 }}
-                              >
-                                Accept
-                              </MotionButton>
-                              <MotionButton
-                                size="sm"
-                                variant="outline"
-                                colorScheme="gray"
-                                onClick={() => respondFriendRequest(req.id, false)}
-                                whileHover={{ scale: 1.05 }}
-                              >
-                                Decline
-                              </MotionButton>
-                            </HStack>
+                  {friendRequests.length > 0 ? (
+                    <VStack spacing={3}>
+                      {friendRequests.filter(r => r.status === 'pending').map(req => (
+                        <HStack key={req.id} w="full" justify="space-between" p={2} bg={hoverBg} borderRadius="lg">
+                          <Text color={textColor}>{req.sender_username}</Text>
+                          <HStack spacing={2}>
+                            <MotionButton
+                              size="sm"
+                              bg={successColor}
+                              color={primaryText}
+                              _hover={{ bg: '#00E099' }}
+                              onClick={() => respondFriendRequest(req.id, true)}
+                              whileHover={{ scale: 1.05 }}
+                            >
+                              <FaCheck />
+                            </MotionButton>
+                            <MotionButton
+                              size="sm"
+                              bg={errorColor}
+                              color={primaryText}
+                              _hover={{ bg: '#E02A20' }}
+                              onClick={() => respondFriendRequest(req.id, false)}
+                              whileHover={{ scale: 1.05 }}
+                            >
+                              <FaTimes />
+                            </MotionButton>
                           </HStack>
-                        </MotionBox>
+                        </HStack>
                       ))}
-                    </AnimatePresence>
-                    {friendRequests.length === 0 && (
-                      <Text textAlign="center" color={secondaryTextColor}>No pending requests</Text>
-                    )}
-                  </VStack>
+                    </VStack>
+                  ) : (
+                    <Text color={secondaryTextColor}>No pending requests.</Text>
+                  )}
                 </TabPanel>
                 <TabPanel p={0}>
-                  <VStack spacing={3}>
-                    {suggestedFriends.map(user => (
-                      <MotionBox
-                        key={user.id}
-                        w="full"
-                        p={3}
-                        bg={hoverBg}
-                        borderRadius="lg"
-                      >
-                        <HStack justify="space-between">
-                          <HStack spacing={3}>
-                            <Avatar size="md" name={user.username} />
-                            <Text fontWeight="bold" color={textColor}>{user.username}</Text>
-                          </HStack>
+                  {suggestedFriends.length > 0 ? (
+                    <VStack spacing={3}>
+                      {suggestedFriends.map(user => (
+                        <HStack key={user.id} w="full" justify="space-between" p={2} bg={hoverBg} borderRadius="lg">
+                          <Text color={textColor}>{user.username}</Text>
                           <MotionButton
                             size="sm"
-                            leftIcon={<FaUserPlus />}
-                            bg={buttonBg}
+                            bg={accentColor}
                             color={primaryText}
+                            _hover={{ bg: buttonHoverBg }}
                             onClick={() => sendFriendRequest(user.username)}
                             whileHover={{ scale: 1.05 }}
                           >
-                            Add
+                            <FaUserPlus />
                           </MotionButton>
                         </HStack>
-                      </MotionBox>
-                    ))}
-                    {suggestedFriends.length === 0 && (
-                      <Text textAlign="center" color={secondaryTextColor}>No suggestions available</Text>
-                    )}
-                  </VStack>
+                      ))}
+                    </VStack>
+                  ) : (
+                    <Text color={secondaryTextColor}>No suggestions available.</Text>
+                  )}
                 </TabPanel>
               </TabPanels>
             </Tabs>
           </ModalBody>
-        </ModalContent>
-      </Modal>
-
-      <Modal isOpen={isDeleteOpen} onClose={onDeleteClose}>
-        <ModalOverlay bg="blackAlpha.800" />
-        <ModalContent bg={glassBg} borderRadius="xl" boxShadow={glowShadow}>
-          <ModalHeader color={textColor}>Delete Message?</ModalHeader>
-          <ModalBody color={secondaryTextColor}>Are you sure you want to delete this message?</ModalBody>
           <ModalFooter>
-            <MotionButton variant="ghost" onClick={onDeleteClose} mr={3} color={secondaryTextColor} _hover={{ color: accentColor }} whileHover={{ scale: 1.05 }}>Cancel</MotionButton>
-            <MotionButton bg={errorColor} color={primaryText} onClick={() => deleteMessage(showDeleteModal)} isLoading={isLoading} whileHover={{ scale: 1.05 }}>Delete</MotionButton>
-          </ModalFooter>
-        </ModalContent>
-      </Modal>
-
-      <Modal isOpen={isConvDeleteOpen} onClose={onConvDeleteClose}>
-        <ModalOverlay bg="blackAlpha.800" />
-        <ModalContent bg={glassBg} borderRadius="xl" boxShadow={glowShadow}>
-          <ModalHeader color={textColor}>Delete Conversation?</ModalHeader>
-          <ModalBody color={secondaryTextColor}>Are you sure you want to delete your chat with {showDeleteConversationModal}?</ModalBody>
-          <ModalFooter>
-            <MotionButton variant="ghost" onClick={onConvDeleteClose} mr={3} color={secondaryTextColor} _hover={{ color: accentColor }} whileHover={{ scale: 1.05 }}>Cancel</MotionButton>
-            <MotionButton bg={errorColor} color={primaryText} onClick={() => deleteConversation(showDeleteConversationModal)} isLoading={isLoading} whileHover={{ scale: 1.05 }}>Delete</MotionButton>
-          </ModalFooter>
-        </ModalContent>
-      </Modal>
-
-      <Modal isOpen={isImageOpen} onClose={onImageClose} size="full">
-        <ModalOverlay bg="blackAlpha.800" />
-        <ModalContent bg="transparent" boxShadow="none">
-          <ModalBody display="flex" alignItems="center" justifyContent="center" p={0}>
-            <MotionBox
-              initial={{ opacity: 0, scale: 0.9 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.9 }}
-              transition={{ duration: 0.5 }}
+            <MotionButton
+              onClick={onFriendRequestsClose}
+              bg={buttonBg}
+              color={primaryText}
+              _hover={{ bg: buttonHoverBg }}
+              whileHover={{ scale: 1.05 }}
             >
-              <Image
-                src={expandedImage}
-                alt="Expanded image"
-                maxH="90vh"
-                maxW="90vw"
-                objectFit="contain"
-                borderRadius="lg"
-                boxShadow={glowShadow}
-                onClick={onImageClose}
-                cursor="pointer"
-              />
-            </MotionBox>
-          </ModalBody>
-          <ModalFooter>
-            <MotionButton bg={secondaryText} color={primaryText} onClick={onImageClose} whileHover={{ scale: 1.05 }}>Close</MotionButton>
+              Close
+            </MotionButton>
           </ModalFooter>
         </ModalContent>
       </Modal>
