@@ -1,7 +1,0 @@
-fastapi
-uvicorn
-asyncpg
-python-jose[cryptography]
-passlib[bcrypt]
-python-dotenv
-pydantic
