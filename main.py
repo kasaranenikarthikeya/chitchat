@@ -61,11 +61,10 @@ async def lifespan(app: FastAPI):
                     sender_id INTEGER REFERENCES users(id),
                     recipient_id INTEGER REFERENCES users(id),
                     content TEXT NOT NULL,
-                    type VARCHAR(10) NOT NULL DEFAULT 'text', -- Initially set to VARCHAR(10)
+                    type VARCHAR(20) NOT NULL DEFAULT 'text', -- Adjusted to VARCHAR(20)
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     is_read BOOLEAN DEFAULT FALSE
                 );
-                ALTER TABLE messages ALTER COLUMN type TYPE VARCHAR(20); -- Increase to VARCHAR(20)
             """)
         logger.info("Database initialized successfully")
     except Exception as e:
@@ -78,13 +77,23 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+# Updated CORS to include frontend URL (replace with your actual frontend Render URL)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000" , "https://your-frontend.onrender.com"],
+    allow_origins=[
+        "http://localhost:3000",              # Local dev
+        "https://your-frontend.onrender.com", # Replace with your frontend Render URL
+        "https://chitchat-f4e6.onrender.com"  # Backend itself (optional)
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Added root endpoint to avoid 404
+@app.get("/")
+async def root():
+    return {"message": "ChitChat Backend is Live!"}
 
 class UserCreate(BaseModel):
     username: str
@@ -212,7 +221,6 @@ async def search_users(search: str = "", current_user: dict = Depends(get_curren
 @app.get("/users/suggestions", response_model=List[UserOut])
 async def get_suggested_users(current_user: dict = Depends(get_current_user)):
     async with db_pool.acquire() as conn:
-        # Fetch users who are not friends, not the current user, and have no pending friend requests
         suggestions = await conn.fetch(
             """
             SELECT id, username
@@ -455,7 +463,7 @@ async def get_conversations(current_user: dict = Depends(get_current_user)):
                 WHERE (m.sender_id = $1 AND m.recipient_id = $2) OR (m.sender_id = $2 AND m.recipient_id = $1)
                 ORDER BY m.timestamp ASC
                 """, current_user["id"], partner["id"]
-        )
+            )
             conversations.append({
                 "username": partner["username"],
                 "messages": [
