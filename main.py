@@ -505,34 +505,44 @@ async def mark_message_read(message_id: int, current_user: dict = Depends(get_cu
         return {"msg": "Message marked as read"}
 
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket, token: str):
-    await websocket.accept()
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()  # Accept connection first
+    token = websocket.query_params.get("token")
+    if not token:
+        await websocket.close(code=1008, reason="No token provided")
+        return
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id = int(payload.get("sub"))
-        async with db_pool.acquire() as conn:
-            user = await conn.fetchrow("SELECT id, username FROM users WHERE id = $1", user_id)
-            if not user:
-                await websocket.close(code=1008)
-                return
-        clients[user_id] = websocket
-        online_users[user_id] = user["username"]
-        for client_id, client_ws in clients.items():
-            await client_ws.send_json({"type": "status", "data": {"username": user["username"], "online": True}})
-        logger.info(f"WebSocket connected: {user['username']} (ID: {user_id})")
-        try:
-            while True:
-                data = await websocket.receive_json()
-                if data["type"] == "typing":
-                    for client_id, client_ws in clients.items():
-                        if client_id != user_id:
-                            await client_ws.send_json({"type": "typing", "data": {"username": user["username"], "isTyping": data["data"]["isTyping"]}})
-        except WebSocketDisconnect:
-            del clients[user_id]
-            del online_users[user_id]
-            for client_id, client_ws in clients.items():
-                await client_ws.send_json({"type": "status", "data": {"username": user["username"], "online": False}})
-            logger.info(f"WebSocket disconnected: {user['username']} (ID: {user_id})")
-    except JWTError:
-        await websocket.close(code=1008)
-        logger.error("WebSocket connection failed: Invalid token")
+        username = payload.get("sub")
+        if not username or username not in users:
+            await websocket.close(code=1008, reason="Invalid user")
+            return
+    except jwt.ExpiredSignatureError:
+        await websocket.close(code=1008, reason="Token expired")
+        return
+    except jwt.InvalidTokenError:
+        await websocket.close(code=1008, reason="Invalid token")
+        return
+    connections[username] = websocket
+    await websocket.send_json({"type": "status", "data": {"username": username, "online": True}})
+    try:
+        while True:
+            data = await websocket.receive_json()
+            if data.get("type") == "message":
+                msg_id = len(messages) + 1
+                msg = {
+                    "id": msg_id,
+                    "sender_username": username,
+                    "recipient_username": data["data"]["recipient_username"],
+                    "content": data["data"]["content"],
+                    "type": data["data"]["type"],
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "is_read": False
+                }
+                messages.append(msg)
+                if msg["recipient_username"] in connections:
+                    await connections[msg["recipient_username"]].send_json({"type": "message", "data": msg})
+    except WebSocketDisconnect:
+        del connections[username]
+        for conn in connections.values():
+            await conn.send_json({"type": "status", "data": {"username": username, "online": False}})
