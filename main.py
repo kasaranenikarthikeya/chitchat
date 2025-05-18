@@ -755,7 +755,7 @@ app.add_middleware(
     CORSMiddleware,
      allow_origins=[
          "http://localhost:3000",
-         "https://chitfront.onrender.com",  # Your frontend URL
+         "https://chitchat-client-nato.onrender.com",  # Your frontend URL
          "https://chitchat-f4e6.onrender.com"
      ],
     allow_credentials=True,
