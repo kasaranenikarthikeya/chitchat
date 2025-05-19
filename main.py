@@ -821,7 +821,7 @@ async def react_to_message(message_id: int, reaction: ReactionRequest, current_u
             raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 # WebSocket endpoint with heartbeat
-@app.websocket("/wss")
+@app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, token: str):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
