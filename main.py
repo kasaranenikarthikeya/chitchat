@@ -124,12 +124,13 @@ app = FastAPI(lifespan=lifespan)
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-     allow_origins=[
-         "http://localhost:3000",
-         "http://localhost:3001",
-         "https://chitchat-client-nato.onrender.com",  # Your frontend URL
-         "https://chitchat-f4e6.onrender.com"
-     ],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "https://chitchat-client-nato.onrender.com",
+        "https://chitchat-f4e6.onrender.com"
+    ] + CORS_ORIGINS,
+    allow_origin_regex=r"https://.*\.netlify\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
