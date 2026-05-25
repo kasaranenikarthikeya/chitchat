@@ -128,7 +128,7 @@ app.add_middleware(
         "http://localhost:3000",
         "http://localhost:3001",
         "https://agent-6a145e02890e234f81c19d4d--chitchat-clientd.netlify.app",
-        "http://13.48.46.222"
+        "https://13.48.46.222.nip.io"
     ] + CORS_ORIGINS,
     allow_origin_regex=r"https://.*\.netlify\.app",
     allow_credentials=True,
