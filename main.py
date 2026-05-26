@@ -6,7 +6,7 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 import asyncpg
 from datetime import datetime, timedelta
-from typing import List, Dict
+from typing import List, Dict, Optional
 import os
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
@@ -63,6 +63,7 @@ async def lifespan(app: FastAPI):
                     password_hash VARCHAR(255) NOT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT DEFAULT NULL;
                 CREATE TABLE IF NOT EXISTS friends (
                     user_id INTEGER REFERENCES users(id),
                     friend_id INTEGER REFERENCES users(id),
@@ -83,6 +84,7 @@ async def lifespan(app: FastAPI):
                     content TEXT NOT NULL,
                     type VARCHAR(20) NOT NULL DEFAULT 'text',
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    is_delivered BOOLEAN DEFAULT FALSE,
                     is_read BOOLEAN DEFAULT FALSE
                 );
                 CREATE TABLE IF NOT EXISTS pinned_messages (
@@ -102,13 +104,24 @@ async def lifespan(app: FastAPI):
                 );
                 -- Add indexes for better query performance
                 CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
+                CREATE INDEX IF NOT EXISTS idx_messages_delivered ON messages(is_delivered);
+                CREATE INDEX IF NOT EXISTS idx_messages_read ON messages(is_read);
+                CREATE INDEX IF NOT EXISTS idx_messages_sender_recipient ON messages(sender_id, recipient_id);
                 CREATE INDEX IF NOT EXISTS idx_friend_requests_status ON friend_requests(status);
                 CREATE INDEX IF NOT EXISTS idx_pinned_messages_message_id ON pinned_messages(message_id);
                 CREATE INDEX IF NOT EXISTS idx_pinned_messages_user_id ON pinned_messages(user_id);
                 CREATE INDEX IF NOT EXISTS idx_reactions_message_id ON reactions(message_id);
                 CREATE INDEX IF NOT EXISTS idx_reactions_user_id ON reactions(user_id);
                 CREATE INDEX IF NOT EXISTS idx_reactions_emoji ON reactions(emoji);
+
+            -- Migration: Add is_delivered column if it doesn't exist
             """)
+            # Safe migration for existing databases
+            try:
+                await conn.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_delivered BOOLEAN DEFAULT FALSE;")
+                logger.info("is_delivered column ensured")
+            except Exception:
+                pass  # Column already exists
         logger.info("Database initialized successfully")
     except Exception as e:
         logger.error(f"Database initialization failed: {str(e)}")
@@ -148,6 +161,7 @@ class MessageCreate(BaseModel):
     recipient_username: str
     content: str
     type: str = "text"
+    client_temp_id: str = None
 
 class MessageUpdate(BaseModel):
     content: str
@@ -162,6 +176,9 @@ class FriendRequestResponse(BaseModel):
 class TranslationRequest(BaseModel):
     language_code: str
 
+class BatchMarkReadRequest(BaseModel):
+    sender_username: str
+
 class MessageOut(BaseModel):
     id: int
     sender_username: str
@@ -169,6 +186,7 @@ class MessageOut(BaseModel):
     content: str
     type: str
     timestamp: str
+    is_delivered: bool
     is_read: bool
     reactions: List[Dict]
     is_pinned: bool
@@ -178,12 +196,15 @@ class MessageOut(BaseModel):
 
 class Conversation(BaseModel):
     username: str
+    avatar_url: Optional[str] = None
     messages: List[MessageOut]
 
 class FriendRequestOut(BaseModel):
     id: int
     sender_username: str
+    sender_avatar: Optional[str] = None
     recipient_username: str
+    recipient_avatar: Optional[str] = None
     status: str
     timestamp: str
 
@@ -193,9 +214,13 @@ class FriendRequestOut(BaseModel):
 class UserOut(BaseModel):
     id: int
     username: str
+    avatar_url: Optional[str] = None
 
 class ReactionRequest(BaseModel):
     emoji: str
+
+class AvatarUpdate(BaseModel):
+    avatar_url: Optional[str] = None
 
 # Token creation
 def create_access_token(data: dict, expires_delta: timedelta = None):
@@ -212,10 +237,10 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         if user_id is None:
             raise HTTPException(status_code=401, detail="Invalid token")
         async with db_pool.acquire() as conn:
-            user = await conn.fetchrow("SELECT id, username FROM users WHERE id = $1", int(user_id))
+            user = await conn.fetchrow("SELECT id, username, avatar_url FROM users WHERE id = $1", int(user_id))
             if not user:
                 raise HTTPException(status_code=401, detail="User not found")
-        return {"id": user["id"], "username": user["username"]}
+        return {"id": user["id"], "username": user["username"], "avatar_url": user["avatar_url"]}
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
@@ -262,7 +287,10 @@ async def login(form_data: LoginRequest):
 # Get current user
 @app.get("/users/me")
 async def read_users_me(current_user: dict = Depends(get_current_user)):
-    return {"username": current_user["username"]}
+    return {
+        "username": current_user["username"],
+        "avatar_url": current_user.get("avatar_url")
+    }
 
 # Search users
 @app.get("/users", response_model=List[UserOut])
@@ -270,13 +298,13 @@ async def search_users(search: str = "", current_user: dict = Depends(get_curren
     async with db_pool.acquire() as conn:
         if search:
             users = await conn.fetch(
-                "SELECT id, username FROM users WHERE username ILIKE $1 AND id != $2",
+                "SELECT id, username, avatar_url FROM users WHERE username ILIKE $1 AND id != $2",
                 f"%{search}%", current_user["id"]
             )
         else:
-            users = await conn.fetch("SELECT id, username FROM users WHERE id != $1", current_user["id"])
+            users = await conn.fetch("SELECT id, username, avatar_url FROM users WHERE id != $1", current_user["id"])
         logger.debug(f"Search returned {len(users)} users")
-        return [{"id": u["id"], "username": u["username"]} for u in users]
+        return [{"id": u["id"], "username": u["username"], "avatar_url": u["avatar_url"]} for u in users]
 
 # Get suggested users
 @app.get("/users/suggestions", response_model=List[UserOut])
@@ -284,7 +312,7 @@ async def get_suggested_users(current_user: dict = Depends(get_current_user)):
     async with db_pool.acquire() as conn:
         suggestions = await conn.fetch(
             """
-            SELECT id, username
+            SELECT id, username, avatar_url
             FROM users u
             WHERE u.id != $1
             AND NOT EXISTS (
@@ -301,8 +329,21 @@ async def get_suggested_users(current_user: dict = Depends(get_current_user)):
             LIMIT 10
             """, current_user["id"]
         )
-        logger.debug(f"Fetched {len(suggestions)} suggested users")
-        return [{"id": s["id"], "username": s["username"]} for s in suggestions]
+        return [{"id": s["id"], "username": s["username"], "avatar_url": s["avatar_url"]} for s in suggestions]
+
+@app.post("/users/avatar")
+async def update_avatar(data: AvatarUpdate, current_user: dict = Depends(get_current_user)):
+    url = data.avatar_url
+    if url:
+        if not url.startswith("data:image/"):
+            raise HTTPException(status_code=400, detail="Invalid image format. Must be a base64 image data URL.")
+    else:
+        url = None
+        
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE users SET avatar_url = $1 WHERE id = $2", url, current_user["id"])
+    logger.info(f"Updated avatar for user: {current_user['username']}")
+    return {"msg": "Profile picture updated successfully", "avatar_url": url}
 
 # Helper: Fetch message row
 async def fetch_message_row(conn, query, *args):
@@ -413,7 +454,9 @@ async def get_friend_requests(current_user: dict = Depends(get_current_user)):
     async with db_pool.acquire() as conn:
         requests = await conn.fetch(
             """
-            SELECT fr.id, u1.username AS sender_username, u2.username AS recipient_username, fr.status, fr.timestamp
+            SELECT fr.id, u1.username AS sender_username, u1.avatar_url AS sender_avatar, 
+                   u2.username AS recipient_username, u2.avatar_url AS recipient_avatar, 
+                   fr.status, fr.timestamp
             FROM friend_requests fr
             JOIN users u1 ON fr.sender_id = u1.id
             JOIN users u2 ON fr.recipient_id = u2.id
@@ -427,7 +470,9 @@ async def get_friend_requests(current_user: dict = Depends(get_current_user)):
             {
                 "id": r["id"],
                 "sender_username": r["sender_username"],
+                "sender_avatar": r["sender_avatar"],
                 "recipient_username": r["recipient_username"],
+                "recipient_avatar": r["recipient_avatar"],
                 "status": r["status"],
                 "timestamp": r["timestamp"].isoformat() + "Z"
             }
@@ -445,14 +490,16 @@ async def send_message(message: MessageCreate, current_user: dict = Depends(get_
             raise HTTPException(status_code=404, detail="Recipient not found")
         if not await are_friends(conn, current_user["id"], recipient["id"]) and message.type != "friend_request":
             raise HTTPException(status_code=403, detail="Not friends with recipient")
+        # Check if recipient is online — if so, mark as delivered immediately
+        recipient_online = recipient["username"] in connections
         msg = await fetch_message_row(
             conn,
             """
-            INSERT INTO messages (sender_id, recipient_id, content, type)
-            VALUES ($1, $2, $3, $4)
-            RETURNING id, sender_id, recipient_id, content, type, timestamp, is_read
+            INSERT INTO messages (sender_id, recipient_id, content, type, is_delivered)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING id, sender_id, recipient_id, content, type, timestamp, is_delivered, is_read
             """,
-            current_user["id"], recipient["id"], message.content, message.type
+            current_user["id"], recipient["id"], message.content, message.type, recipient_online
         )
         message_data = {
             "id": msg["id"],
@@ -461,15 +508,23 @@ async def send_message(message: MessageCreate, current_user: dict = Depends(get_
             "content": msg["content"],
             "type": msg["type"],
             "timestamp": msg["timestamp"],
+            "is_delivered": msg["is_delivered"],
             "is_read": msg["is_read"],
             "reactions": [],
-            "is_pinned": False
+            "is_pinned": False,
+            "client_temp_id": message.client_temp_id
         }
-        if recipient["username"] in connections:
+        if recipient_online:
             await connections[recipient["username"]].send_json({"type": "message", "data": message_data})
         if current_user["username"] in connections:
             await connections[current_user["username"]].send_json({"type": "message", "data": message_data})
-        logger.info(f"Message sent from {current_user['username']} to {recipient['username']} (type: {msg['type']})")
+        # If recipient is online, also send delivered confirmation to sender
+        if recipient_online and current_user["username"] in connections:
+            await connections[current_user["username"]].send_json({
+                "type": "delivered",
+                "data": {"id": msg["id"]}
+            })
+        logger.info(f"Message sent from {current_user['username']} to {recipient['username']} (type: {msg['type']}, delivered: {recipient_online})")
         return {"msg": "Message sent"}
 
 # Edit message
@@ -537,7 +592,7 @@ async def delete_message(message_id: int, current_user: dict = Depends(get_curre
         logger.info(f"Message {message_id} deleted by {current_user['username']}")
         return {"msg": "Message deleted"}
 
-# Mark message as read
+# Mark message as read (single)
 @app.post("/messages/mark_read/{message_id}")
 async def mark_message_read(message_id: int, current_user: dict = Depends(get_current_user)):
     async with db_pool.acquire() as conn:
@@ -552,7 +607,7 @@ async def mark_message_read(message_id: int, current_user: dict = Depends(get_cu
         if not msg:
             raise HTTPException(status_code=404, detail="Message not found or not authorized")
         await conn.execute(
-            "UPDATE messages SET is_read = TRUE WHERE id = $1", message_id
+            "UPDATE messages SET is_read = TRUE, is_delivered = TRUE WHERE id = $1", message_id
         )
         sender = await conn.fetchrow(
             "SELECT username FROM users WHERE id = (SELECT sender_id FROM messages WHERE id = $1)",
@@ -562,6 +617,52 @@ async def mark_message_read(message_id: int, current_user: dict = Depends(get_cu
             await connections[sender["username"]].send_json({"type": "read", "data": {"id": message_id}})
         logger.info(f"Message {message_id} marked as read by {current_user['username']}")
         return {"msg": "Message marked as read"}
+
+# Mark all messages from a sender as read (batch)
+@app.post("/messages/mark_read_batch")
+async def mark_messages_read_batch(request: BatchMarkReadRequest, current_user: dict = Depends(get_current_user)):
+    async with db_pool.acquire() as conn:
+        sender = await conn.fetchrow(
+            "SELECT id, username FROM users WHERE username = $1", request.sender_username
+        )
+        if not sender:
+            raise HTTPException(status_code=404, detail="Sender not found")
+        
+        # Get all unread message IDs from this sender to current user
+        unread_messages = await conn.fetch(
+            """
+            SELECT id FROM messages
+            WHERE sender_id = $1 AND recipient_id = $2 AND is_read = FALSE
+            """,
+            sender["id"], current_user["id"]
+        )
+        
+        if not unread_messages:
+            return {"msg": "No unread messages", "marked_ids": []}
+        
+        message_ids = [m["id"] for m in unread_messages]
+        
+        # Batch update
+        await conn.execute(
+            """
+            UPDATE messages SET is_read = TRUE, is_delivered = TRUE
+            WHERE sender_id = $1 AND recipient_id = $2 AND is_read = FALSE
+            """,
+            sender["id"], current_user["id"]
+        )
+        
+        # Notify sender via WebSocket (batch)
+        if sender["username"] in connections:
+            await connections[sender["username"]].send_json({
+                "type": "read_batch",
+                "data": {
+                    "message_ids": message_ids,
+                    "reader": current_user["username"]
+                }
+            })
+        
+        logger.info(f"{len(message_ids)} messages from {sender['username']} marked as read by {current_user['username']}")
+        return {"msg": f"{len(message_ids)} messages marked as read", "marked_ids": message_ids}
 
 # Get conversations
 @app.get("/messages", response_model=List[Conversation])
@@ -593,9 +694,11 @@ async def get_conversations(current_user: dict = Depends(get_current_user)):
                 GROUP BY message_id
             )
             SELECT 
-                m.id, m.content, m.type, m.timestamp, m.is_read,
+                m.id, m.content, m.type, m.timestamp, m.is_delivered, m.is_read,
                 u1.username AS sender_username,
+                u1.avatar_url AS sender_avatar,
                 u2.username AS recipient_username,
+                u2.avatar_url AS recipient_avatar,
                 CASE WHEN pm.id IS NOT NULL THEN true ELSE false END as is_pinned,
                 COALESCE(mr.reactions, '[]'::json) as reactions
             FROM messages m
@@ -611,9 +714,11 @@ async def get_conversations(current_user: dict = Depends(get_current_user)):
         
         conversations = {}
         for msg in messages:
-            other_user = msg["recipient_username"] if msg["sender_username"] == current_user["username"] else msg["sender_username"]
+            is_sender = msg["sender_username"] == current_user["username"]
+            other_user = msg["recipient_username"] if is_sender else msg["sender_username"]
+            other_avatar = msg["recipient_avatar"] if is_sender else msg["sender_avatar"]
             if other_user not in conversations:
-                conversations[other_user] = []
+                conversations[other_user] = {"messages": [], "avatar_url": other_avatar}
             
             reactions = msg["reactions"] if msg["reactions"] else []
             if isinstance(reactions, str):
@@ -622,21 +727,22 @@ async def get_conversations(current_user: dict = Depends(get_current_user)):
                 except json.JSONDecodeError:
                     reactions = []
             
-            conversations[other_user].append({
+            conversations[other_user]["messages"].append({
                 "id": msg["id"],
                 "sender_username": msg["sender_username"],
                 "recipient_username": msg["recipient_username"],
                 "content": msg["content"],
                 "type": msg["type"],
                 "timestamp": msg["timestamp"].isoformat() + "Z",
+                "is_delivered": msg["is_delivered"],
                 "is_read": msg["is_read"],
                 "reactions": reactions,
                 "is_pinned": msg["is_pinned"]
             })
         
         result = [
-            {"username": username, "messages": messages}
-            for username, messages in conversations.items()
+            {"username": username, "avatar_url": info["avatar_url"], "messages": info["messages"]}
+            for username, info in conversations.items()
         ]
         logger.debug(f"Fetched {len(result)} conversations for {current_user['username']}")
         return result
@@ -830,13 +936,56 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 return
         await websocket.accept()
         username = user["username"]
+        user_id_int = user["id"]
         connections[username] = websocket
         logger.info(f"WebSocket connected for {username}")
 
+        # Broadcast online status to all connected users
         status_data = {"username": username, "online": True}
-        for conn in connections.values():
-            if conn != websocket:
-                await conn.send_json({"type": "status", "data": status_data})
+        for conn_ws in list(connections.values()):
+            if conn_ws != websocket:
+                try:
+                    await conn_ws.send_json({"type": "status", "data": status_data})
+                except Exception:
+                    pass
+
+        # Mark all undelivered messages TO this user as delivered & notify senders
+        try:
+            async with db_pool.acquire() as conn:
+                undelivered = await conn.fetch(
+                    """
+                    SELECT m.id, u.username as sender_username
+                    FROM messages m
+                    JOIN users u ON m.sender_id = u.id
+                    WHERE m.recipient_id = $1 AND m.is_delivered = FALSE
+                    """,
+                    user_id_int
+                )
+                if undelivered:
+                    await conn.execute(
+                        "UPDATE messages SET is_delivered = TRUE WHERE recipient_id = $1 AND is_delivered = FALSE",
+                        user_id_int
+                    )
+                    # Group by sender and send batch delivered notifications
+                    sender_msg_ids = {}
+                    for row in undelivered:
+                        sender = row["sender_username"]
+                        if sender not in sender_msg_ids:
+                            sender_msg_ids[sender] = []
+                        sender_msg_ids[sender].append(row["id"])
+                    
+                    for sender_name, msg_ids in sender_msg_ids.items():
+                        if sender_name in connections:
+                            try:
+                                await connections[sender_name].send_json({
+                                    "type": "delivered_batch",
+                                    "data": {"message_ids": msg_ids}
+                                })
+                            except Exception:
+                                pass
+                    logger.info(f"Marked {len(undelivered)} messages as delivered for {username}")
+        except Exception as e:
+            logger.error(f"Error marking messages as delivered on connect for {username}: {str(e)}")
 
         async def heartbeat():
             while True:
@@ -874,8 +1023,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             if username in connections:
                 del connections[username]
             status_data = {"username": username, "online": False}
-            for conn in connections.values():
-                await conn.send_json({"type": "status", "data": status_data})
+            for conn_ws in list(connections.values()):
+                try:
+                    await conn_ws.send_json({"type": "status", "data": status_data})
+                except Exception:
+                    pass
             logger.info(f"WebSocket cleanup for {username}")
     except JWTError:
         await websocket.close(code=4001, reason="Invalid token")
