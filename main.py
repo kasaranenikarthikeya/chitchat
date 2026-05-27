@@ -50,12 +50,25 @@ if not MISTRAL_API_KEY:
 async def lifespan(app: FastAPI):
     global db_pool
     try:
-        # Render PostgreSQL databases require SSL when connecting externally
-        db_pool = await asyncpg.create_pool(DATABASE_URL.split('?')[0], min_size=5, max_size=20, ssl="require")
-        async with db_pool.acquire() as conn:
-            # Drop the translations table to avoid conflicts
-            await conn.execute("DROP TABLE IF EXISTS translations CASCADE;")
+        ssl_opt = "require"
+        if "ssl=disable" in DATABASE_URL or "sslmode=disable" in DATABASE_URL:
+            ssl_opt = None
+        elif "ssl=require" in DATABASE_URL or "sslmode=require" in DATABASE_URL or "amazonaws.com" in DATABASE_URL:
+            ssl_opt = "require"
             
+        logger.info("Creating database connection pool...")
+        db_pool = await asyncio.wait_for(
+            asyncpg.create_pool(
+                DATABASE_URL.split('?')[0],
+                min_size=1,
+                max_size=4,
+                ssl=ssl_opt,
+                command_timeout=15.0
+            ),
+            timeout=20.0
+        )
+        logger.info("Database pool created. Acquiring connection...")
+        async with db_pool.acquire() as conn:
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     id SERIAL PRIMARY KEY,
@@ -113,6 +126,18 @@ async def lifespan(app: FastAPI):
                 CREATE INDEX IF NOT EXISTS idx_reactions_message_id ON reactions(message_id);
                 CREATE INDEX IF NOT EXISTS idx_reactions_user_id ON reactions(user_id);
                 CREATE INDEX IF NOT EXISTS idx_reactions_emoji ON reactions(emoji);
+
+                CREATE TABLE IF NOT EXISTS call_logs (
+                    id SERIAL PRIMARY KEY,
+                    caller_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                    recipient_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                    type VARCHAR(10) NOT NULL,
+                    status VARCHAR(20) NOT NULL,
+                    duration INTEGER DEFAULT 0,
+                    timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_call_logs_caller_recipient ON call_logs(caller_id, recipient_id);
+                CREATE INDEX IF NOT EXISTS idx_call_logs_timestamp ON call_logs(timestamp);
 
             -- Migration: Add is_delivered column if it doesn't exist
             """)
@@ -221,6 +246,26 @@ class ReactionRequest(BaseModel):
 
 class AvatarUpdate(BaseModel):
     avatar_url: Optional[str] = None
+
+class CallLogCreate(BaseModel):
+    recipient_username: str
+    type: str  # 'audio' or 'video'
+    status: str  # 'completed', 'missed', 'rejected', 'no_answer'
+    duration: int
+
+class CallLogOut(BaseModel):
+    id: int
+    caller_username: str
+    caller_avatar: Optional[str] = None
+    recipient_username: str
+    recipient_avatar: Optional[str] = None
+    type: str
+    status: str
+    duration: int
+    timestamp: str
+
+    class Config:
+        json_encoders = {datetime: lambda v: v.isoformat() + "Z"}
 
 # Token creation
 def create_access_token(data: dict, expires_delta: timedelta = None):
@@ -769,6 +814,59 @@ async def delete_conversation(username: str, current_user: dict = Depends(get_cu
         logger.info(f"Conversation deleted with {username} by {current_user['username']}")
         return {"msg": "Conversation deleted"}
 
+# Create Call Log
+@app.post("/calls")
+async def create_call_log(log: CallLogCreate, current_user: dict = Depends(get_current_user)):
+    async with db_pool.acquire() as conn:
+        recipient = await conn.fetchrow(
+            "SELECT id FROM users WHERE username = $1", log.recipient_username
+        )
+        if not recipient:
+            raise HTTPException(status_code=404, detail="Recipient not found")
+        await conn.execute(
+            """
+            INSERT INTO call_logs (caller_id, recipient_id, type, status, duration)
+            VALUES ($1, $2, $3, $4, $5)
+            """,
+            current_user["id"], recipient["id"], log.type, log.status, log.duration
+        )
+        logger.info(f"Call log created: {current_user['username']} -> {log.recipient_username} ({log.type}, {log.status}, {log.duration}s)")
+        return {"msg": "Call log saved successfully"}
+
+# Get Call History
+@app.get("/calls", response_model=List[CallLogOut])
+async def get_call_history(current_user: dict = Depends(get_current_user)):
+    async with db_pool.acquire() as conn:
+        logs = await conn.fetch(
+            """
+            SELECT 
+                cl.id, cl.type, cl.status, cl.duration, cl.timestamp,
+                u1.username AS caller_username, u1.avatar_url AS caller_avatar,
+                u2.username AS recipient_username, u2.avatar_url AS recipient_avatar
+            FROM call_logs cl
+            JOIN users u1 ON cl.caller_id = u1.id
+            JOIN users u2 ON cl.recipient_id = u2.id
+            WHERE cl.caller_id = $1 OR cl.recipient_id = $1
+            ORDER BY cl.timestamp DESC
+            LIMIT 50
+            """,
+            current_user["id"]
+        )
+        return [
+            {
+                "id": r["id"],
+                "type": r["type"],
+                "status": r["status"],
+                "duration": r["duration"],
+                "timestamp": r["timestamp"].isoformat() + "Z",
+                "caller_username": r["caller_username"],
+                "caller_avatar": r["caller_avatar"],
+                "recipient_username": r["recipient_username"],
+                "recipient_avatar": r["recipient_avatar"]
+            }
+            for r in logs
+        ]
+
 # Pin/Unpin message
 @app.post("/messages/pin/{message_id}")
 async def pin_message(message_id: int, current_user: dict = Depends(get_current_user)):
@@ -1012,6 +1110,29 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     logger.debug(f"Typing event from {username} to {recipient_username}: isTyping={data['data']['isTyping']}")
                 elif data.get("type") == "pong":
                     logger.debug(f"Received pong from {username}")
+                elif data.get("type") == "call_signaling":
+                    sig_data = data.get("data", {})
+                    recipient = sig_data.get("recipient")
+                    if recipient and recipient in connections:
+                        payload = {
+                            "type": "call_signaling",
+                            "data": {
+                                **sig_data,
+                                "sender": username
+                            }
+                        }
+                        await connections[recipient].send_json(payload)
+                        logger.info(f"Forwarded call_signaling from {username} to {recipient} (action: {sig_data.get('action')})")
+                    else:
+                        if username in connections:
+                            await connections[username].send_json({
+                                "type": "call_signaling",
+                                "data": {
+                                    "action": "offline",
+                                    "recipient": recipient
+                                }
+                            })
+                        logger.warning(f"Recipient {recipient} offline for call_signaling from {username}")
                 else:
                     logger.warning(f"Unknown WebSocket message type from {username}: {data.get('type')}")
         except WebSocketDisconnect:
@@ -1051,6 +1172,19 @@ async def get_cached_translation(message_id: int, language_code: str, current_us
 @app.get("/api-key")
 async def get_api_key(current_user: dict = Depends(get_current_user)):
     return {"api_key": MISTRAL_API_KEY}
+
+class ClientLog(BaseModel):
+    level: str
+    message: str
+    error: Optional[str] = None
+
+@app.post("/client-logs")
+async def log_client_message(log: ClientLog):
+    if log.level == "error":
+        logger.error(f"[CLIENT ERROR] {log.message} - details: {log.error}")
+    else:
+        logger.info(f"[CLIENT LOG] {log.message}")
+    return {"status": "ok"}
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
